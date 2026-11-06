@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>For you</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #fff; overflow: hidden; touch-action: none; }
+  canvas { display: block; width: 100vw; height: 100vh; height: 100dvh; }
+  #hint { position: fixed; left: 0; right: 0; bottom: 14px; text-align: center;
+    font: 13px -apple-system, system-ui, sans-serif; color: #e48ab4; opacity: 0;
+    transition: opacity 1.2s; pointer-events: none; }
+  #start { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+    background: #fff; transition: opacity .6s; z-index: 2; }
+  #start.hide { opacity: 0; pointer-events: none; }
+  #btn { border: 0; cursor: pointer; padding: 18px 38px; border-radius: 14px;
+    font: 600 20px -apple-system, system-ui, sans-serif; color: #fff; background: #ff69b4;
+    box-shadow: 0 0 0 0 rgba(255,105,180,.45); animation: pulse 1.8s infinite;
+    -webkit-tap-highlight-color: transparent; }
+  #btn:active { transform: scale(.96); }
+  @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(255,105,180,.45); }
+    70% { box-shadow: 0 0 0 22px rgba(255,105,180,0); } 100% { box-shadow: 0 0 0 0 rgba(255,105,180,0); } }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hint">tap to replay</div>
+<div id="start"><button id="btn">нажми &#9825;</button></div>
+<script>
+(() => {
+  const LETTER = 'S';
+  const cv = document.getElementById('c');
+  const ctx = cv.getContext('2d');
+  const hint = document.getElementById('hint');
+  let W, H, dpr, layer, lctx, heartMask, letterMask, hb, lb, confetti, phase, placed, raf;
+
+  const HEART_COLORS = ['255,105,180', '255,140,200', '255,120,190', '250,160,210'];
+  const WHITE_COLORS = ['255,255,255', '255,250,252', '255,245,250'];
+
+  function heartPoints(k, cx, cy) {
+    const pts = [];
+    for (let i = 0; i < 360; i++) {
+      const t = i * Math.PI / 180;
+      const x = 16 * Math.pow(Math.sin(t), 3);
+      const y = 13 * Math.cos(t) - 5 * Math.cos(2 * t) - 2 * Math.cos(3 * t) - Math.cos(4 * t);
+      pts.push([cx + x * k, cy - y * k]);
+    }
+    return pts;
+  }
+
+  function makeMask(draw) {
+    const m = document.createElement('canvas');
+    m.width = W; m.height = H;
+    const c = m.getContext('2d');
+    c.fillStyle = '#000';
+    draw(c);
+    const data = c.getImageData(0, 0, W, H).data;
+    return (x, y) => {
+      x = x | 0; y = y | 0;
+      if (x < 0 || y < 0 || x >= W || y >= H) return false;
+      return data[(y * W + x) * 4 + 3] > 128;
+    };
+  }
+
+  function bounds(test, step) {
+    let x0 = W, y0 = H, x1 = 0, y1 = 0;
+    for (let y = 0; y < H; y += step) for (let x = 0; x < W; x += step)
+      if (test(x, y)) { x0 = Math.min(x0, x); y0 = Math.min(y0, y); x1 = Math.max(x1, x); y1 = Math.max(y1, y); }
+    return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+  }
+
+  function setup() {
+    dpr = Math.min(window.devicePixelRatio || 1, 2);
+    W = Math.round(window.innerWidth * dpr);
+    H = Math.round(window.innerHeight * dpr);
+    cv.width = W; cv.height = H;
+
+    layer = document.createElement('canvas');
+    layer.width = W; layer.height = H;
+    lctx = layer.getContext('2d');
+
+    // heart as big as the screen allows (width 32 units, height ~29 units)
+    const k = Math.min(W * 0.94 / 32, H * 0.94 / 29);
+    let pts = heartPoints(k, 0, 0);
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    for (const [x, y] of pts) { minX = Math.min(minX, x); maxX = Math.max(maxX, x); minY = Math.min(minY, y); maxY = Math.max(maxY, y); }
+    const dx = W / 2 - (minX + maxX) / 2, dy = H / 2 - (minY + maxY) / 2;
+    pts = pts.map(([x, y]) => [x + dx, y + dy]);
+    hb = { x: minX + dx, y: minY + dy, w: maxX - minX, h: maxY - minY };
+
+    heartMask = makeMask(c => {
+      c.beginPath(); pts.forEach(([x, y], i) => i ? c.lineTo(x, y) : c.moveTo(x, y)); c.closePath(); c.fill();
+    });
+
+    const fontSize = hb.h * 0.52;
+    letterMask = makeMask(c => {
+      c.font = `bold ${fontSize}px Arial, Helvetica, sans-serif`;
+      c.textAlign = 'center'; c.textBaseline = 'middle';
+      c.fillText(LETTER, hb.x + hb.w / 2, hb.y + hb.h * 0.52);
+    });
+    lb = bounds(letterMask, Math.max(2, Math.round(4 * dpr)));
+
+    const n = Math.round(Math.min(160, Math.max(70, (W * H) / (dpr * dpr) / 9000)));
+    confetti = [];
+    for (let i = 0; i < n; i++) confetti.push(newConfetti(true));
+
+    phase = 1; placed = 0;
+    hint.style.opacity = 0;
+  }
+
+  function newConfetti(anywhere) {
+    const s = (8 + Math.random() * 30) * dpr;
+    return {
+      x: Math.random() * W, y: anywhere ? Math.random() * H : -s, s,
+      v: (0.4 + Math.random() * 1.1) * dpr, a: Math.random() * Math.PI * 2,
+      va: (Math.random() - 0.5) * 0.025, ph: Math.random() * 6.28,
+      c: `rgba(255,${90 + (Math.random() * 90 | 0)},${170 + (Math.random() * 50 | 0)},${(0.14 + Math.random() * 0.24).toFixed(2)})`
+    };
+  }
+
+  function placeSquares(area, cell, colors, alpha, test, perFrame) {
+    let n = 0, tries = 0;
+    while (n < perFrame && tries < 800) {
+      tries++;
+      const s = cell * (0.4 + Math.random() * 1.2);
+      const x = area.x + Math.random() * Math.max(1, area.w - s);
+      const y = area.y + Math.random() * Math.max(1, area.h - s);
+      if (test(x, y) && test(x + s, y) && test(x, y + s) && test(x + s, y + s) && test(x + s / 2, y + s / 2)) {
+        lctx.fillStyle = `rgba(${colors[Math.random() * colors.length | 0]},${alpha})`;
+        lctx.fillRect(x, y, s, s);
+        n++;
+      }
+    }
+    return n;
+  }
+
+  let t = 0;
+  function frame() {
+    t++;
+    const base = Math.min(W, H);
+
+    if (phase === 1) {
+      placed += placeSquares(hb, hb.h / 20, HEART_COLORS, 0.2, heartMask, 10);
+      if (placed >= 1500) { phase = 2; placed = 0; }
+    } else if (phase === 2) {
+      placed += placeSquares(lb, hb.h / 40, WHITE_COLORS, 0.47, letterMask, 3);
+      if (placed >= 900) { phase = 3; hint.style.opacity = 1; }
+    }
+
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, W, H);
+
+    for (const p of confetti) {
+      p.y += p.v; p.a += p.va;
+      if (p.y > H + p.s) Object.assign(p, newConfetti(false));
+      const px = p.x + Math.sin(t * 0.01 + p.ph) * 15 * dpr;
+      ctx.save();
+      ctx.translate(px, p.y); ctx.rotate(p.a);
+      ctx.fillStyle = p.c;
+      ctx.fillRect(-p.s / 2, -p.s / 2, p.s, p.s);
+      ctx.restore();
+    }
+
+    ctx.drawImage(layer, 0, 0);
+    raf = requestAnimationFrame(frame);
+  }
+
+  function restart() {
+    cancelAnimationFrame(raf);
+    setup();
+    raf = requestAnimationFrame(frame);
+  }
+
+  let started = false, rt;
+  window.addEventListener('resize', () => { if (!started) return; clearTimeout(rt); rt = setTimeout(restart, 250); });
+  cv.addEventListener('pointerdown', () => { if (phase === 3) restart(); });
+  window.addEventListener('keydown', e => { if ((e.key === 'Enter' || e.key === ' ') && phase === 3) restart(); });
+
+  document.getElementById('btn').addEventListener('click', e => {
+    e.stopPropagation();
+    if (started) return;
+    started = true;
+    document.getElementById('start').classList.add('hide');
+    restart();
+  });
+})();
+</script>
+</body>
+</html>
